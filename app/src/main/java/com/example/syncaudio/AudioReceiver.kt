@@ -42,7 +42,10 @@ class AudioReceiver {
 
             try {
 
-                Log.d(TAG, "Connecting to $SERVER_IP:$SERVER_PORT")
+                Log.d(
+                    TAG,
+                    "Connecting to $SERVER_IP:$SERVER_PORT"
+                )
 
                 socket = Socket(
                     SERVER_IP,
@@ -51,7 +54,10 @@ class AudioReceiver {
 
                 socket?.tcpNoDelay = true
 
-                Log.d(TAG, "Connected to sender")
+                Log.d(
+                    TAG,
+                    "Connected to sender"
+                )
 
                 inputStream = BufferedInputStream(
                     socket!!.getInputStream(),
@@ -64,6 +70,11 @@ class AudioReceiver {
                         CHANNEL_CONFIG,
                         AUDIO_ENCODING
                     )
+
+                Log.d(
+                    TAG,
+                    "AudioTrack minBufferSize = $minBufferSize"
+                )
 
                 audioTrack = AudioTrack.Builder()
                     .setAudioAttributes(
@@ -78,9 +89,15 @@ class AudioReceiver {
                     )
                     .setAudioFormat(
                         AudioFormat.Builder()
-                            .setEncoding(AUDIO_ENCODING)
-                            .setSampleRate(SAMPLE_RATE)
-                            .setChannelMask(CHANNEL_CONFIG)
+                            .setEncoding(
+                                AUDIO_ENCODING
+                            )
+                            .setSampleRate(
+                                SAMPLE_RATE
+                            )
+                            .setChannelMask(
+                                CHANNEL_CONFIG
+                            )
                             .build()
                     )
                     .setBufferSizeInBytes(
@@ -93,9 +110,14 @@ class AudioReceiver {
 
                 audioTrack?.play()
 
-                Log.d(TAG, "AudioTrack started")
+                Log.d(
+                    TAG,
+                    "AudioTrack started"
+                )
 
                 val buffer = ByteArray(8192)
+
+                var totalBytes = 0L
 
                 while (running) {
 
@@ -103,14 +125,31 @@ class AudioReceiver {
                         inputStream?.read(buffer) ?: -1
 
                     if (bytesRead <= 0) {
-                        Log.d(TAG, "Connection closed")
+
+                        Log.d(
+                            TAG,
+                            "Connection closed"
+                        )
+
                         break
                     }
 
-                    audioTrack?.write(
+                    totalBytes += bytesRead
+
+                    Log.d(
+                        TAG,
+                        "Received $bytesRead bytes, total=$totalBytes"
+                    )
+
+                    val written = audioTrack?.write(
                         buffer,
                         0,
                         bytesRead
+                    ) ?: -1
+
+                    Log.d(
+                        TAG,
+                        "AudioTrack wrote $written bytes"
                     )
                 }
 
@@ -157,6 +196,9 @@ class AudioReceiver {
         socket = null
         audioTrack = null
 
-        Log.d(TAG, "Receiver stopped")
+        Log.d(
+            TAG,
+            "Receiver stopped"
+        )
     }
 }
