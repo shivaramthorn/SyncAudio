@@ -1,138 +1,197 @@
+
 package com.example.syncaudio
 
+import android.content.Context
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
+import android.os.Build
 import android.util.Log
 import java.io.BufferedOutputStream
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.concurrent.thread
 
 class AudioStreamServer(
+    private val context: Context,
     private val port: Int = 50005
 ) {
+    companion object {
+        private const val TAG = "SyncAudio"
+        private const val SERVICE_TYPE = "_syncaudio._tcp."
+    }
+
+    private data class ClientConnection(
+        val socket: Socket,
+        val output: BufferedOutputStream
+    )
 
     private var serverSocket: ServerSocket? = null
-    private var clientSocket: Socket? = null
-    private var outputStream: BufferedOutputStream? = null
+    private val clients = CopyOnWriteArrayList<ClientConnection>()
 
     @Volatile
     private var running = false
 
-    @Volatile
-    private var clientConnected = false
+    private val nsdManager =
+        context.getSystemService(Context.NSD_SERVICE) as NsdManager
+
+    private var registrationListener:
+            NsdManager.RegistrationListener? = null
 
     fun start() {
-
         if (running) return
-
         running = true
 
         thread(name = "AudioStreamServer") {
-
             try {
+                val server = ServerSocket(port)
+                serverSocket = server
 
-                serverSocket = ServerSocket(port)
+                Log.d(TAG, "Server started on port ${server.localPort}")
+                registerService(server.localPort)
 
-                Log.d(
-                    "SyncAudio",
-                    "Server started on port $port"
-                )
+                while (running) {
+                    val socket = server.accept()
+                    socket.tcpNoDelay = true
 
-                clientSocket = serverSocket!!.accept()
-
-                clientSocket!!.tcpNoDelay = true
-
-                Log.d(
-                    "SyncAudio",
-                    "Client connected: " +
-                            clientSocket!!.inetAddress.hostAddress
-                )
-
-                outputStream = BufferedOutputStream(
-                    clientSocket!!.getOutputStream(),
-                    8192
-                )
-
-                clientConnected = true
-
-                Log.d(
-                    "SyncAudio",
-                    "Ready to send audio"
-                )
-
-            } catch (e: Exception) {
-
-                if (running) {
-
-                    Log.e(
-                        "SyncAudio",
-                        "Server error: ${e.message}",
-                        e
+                    val client = ClientConnection(
+                        socket,
+                        BufferedOutputStream(
+                            socket.getOutputStream(),
+                            8192
+                        )
                     )
+
+                    clients.add(client)
+
+                    Log.d(
+                        TAG,
+                        "Receiver connected: ${socket.inetAddress.hostAddress}; " +
+                                "receivers=${clients.size}"
+                    )
+
+                    // Detect a receiver disconnecting.
+                    thread(name = "AudioClientMonitor") {
+                        try {
+                            val input = socket.getInputStream()
+                            val discard = ByteArray(256)
+
+                            while (running && !socket.isClosed) {
+                                val count = input.read(discard)
+                                if (count < 0) break
+                            }
+                        } catch (_: Exception) {
+                        } finally {
+                            removeClient(client)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                if (running) {
+                    Log.e(TAG, "Server error: ${e.message}", e)
                 }
             }
         }
     }
 
-    fun sendAudio(
-        buffer: ByteArray,
-        length: Int
-    ) {
-
-        if (!running || !clientConnected) {
-            return
-        }
-
+    private fun registerService(actualPort: Int) {
         try {
+            val info = NsdServiceInfo().apply {
+                serviceName = "SyncAudio-${Build.MODEL}"
+                serviceType = SERVICE_TYPE
+                port = actualPort
+            }
 
-            outputStream?.write(
-                buffer,
-                0,
-                length
+            val listener =
+                object : NsdManager.RegistrationListener {
+                    override fun onServiceRegistered(
+                        serviceInfo: NsdServiceInfo
+                    ) {
+                        Log.d(TAG, "Discoverable as ${serviceInfo.serviceName}")
+                    }
+
+                    override fun onRegistrationFailed(
+                        serviceInfo: NsdServiceInfo,
+                        errorCode: Int
+                    ) {
+                        Log.e(TAG, "NSD registration failed: $errorCode")
+                    }
+
+                    override fun onServiceUnregistered(
+                        serviceInfo: NsdServiceInfo
+                    ) {
+                        Log.d(TAG, "NSD service unregistered")
+                    }
+
+                    override fun onUnregistrationFailed(
+                        serviceInfo: NsdServiceInfo,
+                        errorCode: Int
+                    ) {
+                        Log.e(TAG, "NSD unregistration failed: $errorCode")
+                    }
+                }
+
+            registrationListener = listener
+
+            nsdManager.registerService(
+                info,
+                NsdManager.PROTOCOL_DNS_SD,
+                listener
             )
-
-            outputStream?.flush()
-
         } catch (e: Exception) {
+            Log.e(TAG, "Could not register local service: ${e.message}", e)
+        }
+    }
 
-            Log.e(
-                "SyncAudio",
-                "Send error: ${e.message}",
-                e
-            )
+    fun sendAudio(buffer: ByteArray, length: Int) {
+        if (!running || length <= 0) return
 
-            clientConnected = false
+        for (client in clients) {
+            try {
+                synchronized(client) {
+                    client.output.write(buffer, 0, length)
+                    client.output.flush()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Send failed: ${e.message}")
+                removeClient(client)
+            }
+        }
+    }
 
-            stop()
+    private fun removeClient(client: ClientConnection) {
+        if (clients.remove(client)) {
+            try {
+                client.socket.close()
+            } catch (_: Exception) {
+            }
+
+            Log.d(TAG, "Receiver disconnected; remaining=${clients.size}")
         }
     }
 
     fun stop() {
-
         running = false
-        clientConnected = false
 
         try {
-            outputStream?.close()
+            registrationListener?.let {
+                nsdManager.unregisterService(it)
+            }
         } catch (_: Exception) {
         }
 
-        try {
-            clientSocket?.close()
-        } catch (_: Exception) {
-        }
+        registrationListener = null
 
         try {
             serverSocket?.close()
         } catch (_: Exception) {
         }
 
-        outputStream = null
-        clientSocket = null
-        serverSocket = null
+        for (client in clients) {
+            removeClient(client)
+        }
 
-        Log.d(
-            "SyncAudio",
-            "Server stopped"
-        )
+        serverSocket = null
+        Log.d(TAG, "Server stopped")
     }
 }
