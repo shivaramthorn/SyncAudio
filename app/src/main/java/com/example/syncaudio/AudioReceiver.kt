@@ -7,9 +7,11 @@ import android.media.AudioTrack
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
@@ -17,18 +19,15 @@ class AudioReceiver(
     context: Context,
     private val onStatus: (String) -> Unit = {}
 ) {
+
     companion object {
         private const val TAG = "SyncAudio"
         private const val SERVICE_TYPE = "_syncaudio._tcp."
         private const val SAMPLE_RATE = 48000
-
-        // Increase receiver loudness moderately.
-        // Samples are clamped to prevent integer overflow.
         private const val AUDIO_GAIN = 1.5f
-
-        // Aim for a practical buffer of around 100 ms or more
-        // if the device's minimum buffer requires it.
         private const val TARGET_BUFFER_MS = 100
+        private const val FRAME_SIZE = 4 // Stereo PCM16: 2 channels × 2 bytes
+        private const val DIAGNOSTIC_INTERVAL_NS = 5_000_000_000L
     }
 
     private val appContext = context.applicationContext
@@ -87,7 +86,9 @@ class AudioReceiver(
                                 connecting = false
 
                                 if (running) {
-                                    report("Could not resolve sender. Restart receiver to retry.")
+                                    report(
+                                        "Could not resolve sender. Restart receiver to retry."
+                                    )
                                 }
                             }
 
@@ -97,7 +98,10 @@ class AudioReceiver(
                                 val host = resolved.host?.hostAddress
                                 val port = resolved.port
 
-                                if (!running || host.isNullOrBlank() || port <= 0) {
+                                if (!running ||
+                                    host.isNullOrBlank() ||
+                                    port <= 0
+                                ) {
                                     connecting = false
                                     report("Invalid sender address")
                                     return
@@ -189,9 +193,8 @@ class AudioReceiver(
                     )
                 }
 
-                // Stereo PCM16 = 4 bytes per audio frame.
                 val targetBufferBytes =
-                    SAMPLE_RATE * 4 * TARGET_BUFFER_MS / 1000
+                    SAMPLE_RATE * FRAME_SIZE * TARGET_BUFFER_MS / 1000
 
                 val playbackBufferBytes =
                     maxOf(minBuffer * 2, targetBufferBytes)
@@ -233,9 +236,7 @@ class AudioReceiver(
                     )
                 }
 
-                // Explicitly set normal Android playback volume.
                 track.setVolume(1.0f)
-
                 audioTrack = track
                 track.play()
 
@@ -243,18 +244,27 @@ class AudioReceiver(
                 report("Connected — receiving audio")
 
                 val input = newSocket.getInputStream()
-                Log.d(TAG, "V1.3 receiver diagnostics started")
-                var diagnosticStartNs = android.os.SystemClock.elapsedRealtimeNanos()
-                var diagnosticBytes = 0L
-                var diagnosticWriteNs = 0L
-                var diagnosticWriteCalls = 0L
 
-                // Preserve partial PCM frames between TCP reads.
-                // Stereo PCM16 frames must contain 4 bytes.
-                val frameSize = 4
+                // Stage 2 diagnostics.
+                Log.d(TAG, "V1.4 receiver diagnostics started")
+                Log.d(
+                    TAG,
+                    "V1.4 buffer: min=$minBuffer, " +
+                            "playback=$playbackBufferBytes bytes"
+                )
+
+                var diagnosticStartNs = SystemClock.elapsedRealtimeNanos()
+                var diagnosticReadCalls = 0L
+                var diagnosticBytesReceived = 0L
+                var diagnosticWriteCalls = 0L
+                var diagnosticWrittenBytes = 0L
+                var diagnosticWriteNs = 0L
+                var diagnosticZeroWrites = 0L
+
+                // TCP reads may end in the middle of a PCM audio frame.
                 val networkBuffer = ByteArray(8192)
                 val processingBuffer = ByteArray(
-                    networkBuffer.size + frameSize
+                    networkBuffer.size + FRAME_SIZE
                 )
 
                 var leftoverBytes = 0
@@ -269,45 +279,18 @@ class AudioReceiver(
                     if (count < 0) break
                     if (count == 0) continue
 
+                    diagnosticReadCalls++
+                    diagnosticBytesReceived += count.toLong()
+
                     val totalBytes = leftoverBytes + count
-                    diagnosticBytes += count
-
-                    val nowNs = android.os.SystemClock.elapsedRealtimeNanos()
-
-                    if (nowNs - diagnosticStartNs >= 5_000_000_000L) {
-                        val elapsedSeconds =
-                            (nowNs - diagnosticStartNs) / 1_000_000_000.0
-
-                        val throughputKbps =
-                            diagnosticBytes * 8.0 / elapsedSeconds / 1000.0
-
-                        val averageWriteMs =
-                            if (diagnosticWriteCalls > 0) {
-                                diagnosticWriteNs / 1_000_000.0 / diagnosticWriteCalls
-                            } else {
-                                0.0
-                            }
-
-                        Log.d(
-                            TAG,
-                            "V1.3 receiver: throughput=${"%.1f".format(throughputKbps)} kbps, " +
-                                    "avgWrite=${"%.3f".format(averageWriteMs)} ms, " +
-                                    "writeCalls=$diagnosticWriteCalls"
-                        )
-
-                        diagnosticStartNs = nowNs
-                        diagnosticBytes = 0L
-                        diagnosticWriteNs = 0L
-                        diagnosticWriteCalls = 0L
-                    }
                     val usableBytes =
-                        totalBytes - (totalBytes % frameSize)
+                        totalBytes - (totalBytes % FRAME_SIZE)
 
-                    // Amplify each signed 16-bit little-endian sample.
-                    // Clamp samples to the valid PCM16 range.
+                    // Amplify signed 16-bit little-endian PCM samples.
+                    // Clamp values to avoid overflowing the PCM16 range.
                     var index = 0
 
-                    while (index < usableBytes) {
+                    while (index + 1 < usableBytes) {
                         val low =
                             processingBuffer[index].toInt() and 0xFF
 
@@ -333,12 +316,12 @@ class AudioReceiver(
                         index += 2
                     }
 
-                    // Write only complete frames to AudioTrack.
+                    // Send complete PCM frames to AudioTrack.
                     var writtenOffset = 0
 
                     while (running && writtenOffset < usableBytes) {
                         val writeStartNs =
-                            android.os.SystemClock.elapsedRealtimeNanos()
+                            SystemClock.elapsedRealtimeNanos()
 
                         val written = track.write(
                             processingBuffer,
@@ -347,9 +330,18 @@ class AudioReceiver(
                             AudioTrack.WRITE_BLOCKING
                         )
 
-                        diagnosticWriteNs +=
-                            android.os.SystemClock.elapsedRealtimeNanos() - writeStartNs
+                        val writeDurationNs =
+                            SystemClock.elapsedRealtimeNanos() -
+                                    writeStartNs
+
+                        diagnosticWriteNs += writeDurationNs
                         diagnosticWriteCalls++
+
+                        Log.d(
+                            TAG,
+                            "V1.4 WRITE TEST: written=$written, " +
+                                    "duration=${writeDurationNs / 1_000_000.0} ms"
+                        )
 
                         if (written < 0) {
                             throw IllegalStateException(
@@ -357,12 +349,20 @@ class AudioReceiver(
                             )
                         }
 
-                        if (written == 0) break
+                        if (written == 0) {
+                            diagnosticZeroWrites++
+                            Log.w(
+                                TAG,
+                                "AudioTrack.write returned 0 bytes"
+                            )
+                            break
+                        }
 
+                        diagnosticWrittenBytes += written.toLong()
                         writtenOffset += written
                     }
 
-                    // Keep the final 0–3 bytes for the next read.
+                    // Preserve the remaining 0–3 bytes for the next read.
                     leftoverBytes = totalBytes - usableBytes
 
                     if (leftoverBytes > 0) {
@@ -373,6 +373,53 @@ class AudioReceiver(
                             0,
                             leftoverBytes
                         )
+                    }
+
+                    // Report after processing this chunk, so the current
+                    // chunk's AudioTrack writes are included in the counters.
+                    val nowNs = SystemClock.elapsedRealtimeNanos()
+
+                    if (nowNs - diagnosticStartNs >=
+                        DIAGNOSTIC_INTERVAL_NS
+                    ) {
+                        val elapsedSeconds =
+                            (nowNs - diagnosticStartNs) / 1_000_000_000.0
+
+                        val throughputKbps =
+                            if (elapsedSeconds > 0) {
+                                diagnosticBytesReceived * 8.0 /
+                                        elapsedSeconds / 1000.0
+                            } else {
+                                0.0
+                            }
+
+                        val averageWriteMs =
+                            if (diagnosticWriteCalls > 0) {
+                                diagnosticWriteNs / 1_000_000.0 /
+                                        diagnosticWriteCalls
+                            } else {
+                                0.0
+                            }
+
+                        val message =
+                            "V1.4 diagnostics: " +
+                                    "throughput=${String.format(Locale.US, "%.1f", throughputKbps)} kbps, " +
+                                    "readCalls=$diagnosticReadCalls, " +
+                                    "receivedBytes=$diagnosticBytesReceived, " +
+                                    "playbackBytes=$diagnosticWrittenBytes, " +
+                                    "avgWrite=${String.format(Locale.US, "%.3f", averageWriteMs)} ms, " +
+                                    "writeCalls=$diagnosticWriteCalls, " +
+                                    "zeroWrites=$diagnosticZeroWrites"
+
+                        Log.d(TAG, message)
+
+                        diagnosticStartNs = nowNs
+                        diagnosticReadCalls = 0L
+                        diagnosticBytesReceived = 0L
+                        diagnosticWriteCalls = 0L
+                        diagnosticWrittenBytes = 0L
+                        diagnosticWriteNs = 0L
+                        diagnosticZeroWrites = 0L
                     }
                 }
 
