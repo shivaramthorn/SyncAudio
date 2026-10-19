@@ -12,12 +12,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.*
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.ui.Modifier
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.core.content.ContextCompat
 
 class MainActivity : ComponentActivity() {
@@ -37,19 +37,24 @@ class MainActivity : ComponentActivity() {
         ).format(java.util.Date())
 
         eventLog.add(0, "$time  $message")
-        while (eventLog.size > 30) eventLog.removeAt(eventLog.lastIndex)
+
+        while (eventLog.size > 30) {
+            eventLog.removeAt(eventLog.lastIndex)
+        }
     }
 
     private fun stopReceiver() {
         val receiver = audioReceiver
         audioReceiver = null
         receiver?.stop()
+
         receiverStatus = "Stopped"
         addEvent("Receiver stopped")
     }
 
     private fun stopSender() {
         val serviceIntent = Intent(this, AudioCaptureService::class.java)
+
         if (stopService(serviceIntent)) {
             senderStatus = "Stopped"
             addEvent("Sender service stopped")
@@ -65,6 +70,7 @@ class MainActivity : ComponentActivity() {
     private fun switchToReceiver() {
         stopSender()
         stopReceiver()
+
         senderStatus = "Stopped"
         dashboardStatus = "Receiver mode selected"
         addEvent("Switched to Receiver mode")
@@ -75,10 +81,19 @@ class MainActivity : ComponentActivity() {
             ActivityResultContracts.StartActivityForResult()
         ) { result ->
             if (result.resultCode == RESULT_OK && result.data != null) {
-                val serviceIntent = Intent(this, AudioCaptureService::class.java).apply {
+                val serviceIntent = Intent(
+                    this,
+                    AudioCaptureService::class.java
+                ).apply {
                     action = AudioCaptureService.ACTION_START
-                    putExtra(AudioCaptureService.EXTRA_RESULT_CODE, result.resultCode)
-                    putExtra(AudioCaptureService.EXTRA_RESULT_DATA, result.data)
+                    putExtra(
+                        AudioCaptureService.EXTRA_RESULT_CODE,
+                        result.resultCode
+                    )
+                    putExtra(
+                        AudioCaptureService.EXTRA_RESULT_DATA,
+                        result.data
+                    )
                 }
 
                 ContextCompat.startForegroundService(this, serviceIntent)
@@ -93,7 +108,10 @@ class MainActivity : ComponentActivity() {
         }
 
     private fun requestAudioCapture() {
-        val manager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        val manager = getSystemService(
+            MEDIA_PROJECTION_SERVICE
+        ) as MediaProjectionManager
+
         projectionLauncher.launch(manager.createScreenCaptureIntent())
     }
 
@@ -108,6 +126,7 @@ class MainActivity : ComponentActivity() {
     private fun startReceiver() {
         stopSender()
         stopReceiver()
+
         receiverStatus = "Searching for sender"
         dashboardStatus = "Discovering SyncAudio sender"
         addEvent("Automatic sender discovery requested")
@@ -124,6 +143,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
         )
+
         audioReceiver?.start()
     }
 
@@ -133,17 +153,33 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme {
-                val intercomDevices = remember { mutableStateListOf<IntercomDevice>() }
-                val connectedIntercomDevices = remember { mutableStateListOf<String>() }
-                val intercomDeviceName = remember { "SyncAudio - ${Build.MODEL}" }
-                val intercomStatus = remember { mutableStateOf("Intercom ready") }
-                var intercomAudioStarted by remember { mutableStateOf(false) }
+                val intercomDevices = remember {
+                    mutableStateListOf<IntercomDevice>()
+                }
+
+                val connectedIntercomDevices = remember {
+                    mutableStateListOf<String>()
+                }
+
+                val intercomDeviceName = remember {
+                    "SyncAudio - ${Build.MODEL}"
+                }
+
+                val intercomStatus = remember {
+                    mutableStateOf("Intercom ready")
+                }
+
+                var intercomAudioStarted by remember {
+                    mutableStateOf(false)
+                }
 
                 val intercomManager = remember {
                     NearbyIntercomManager(
                         context = this@MainActivity,
                         onStatus = { status ->
-                            runOnUiThread { intercomStatus.value = status }
+                            runOnUiThread {
+                                intercomStatus.value = status
+                            }
                         },
                         onDevicesChanged = { devices ->
                             runOnUiThread {
@@ -155,6 +191,7 @@ class MainActivity : ComponentActivity() {
                             runOnUiThread {
                                 connectedIntercomDevices.clear()
                                 connectedIntercomDevices.addAll(endpoints)
+
                                 if (endpoints.isEmpty() && intercomAudioStarted) {
                                     stopService(
                                         Intent(
@@ -172,12 +209,14 @@ class MainActivity : ComponentActivity() {
                                     this@MainActivity,
                                     IntercomAudioService::class.java
                                 ).apply {
-                                    action = IntercomAudioService.ACTION_PLAY_FRAME
+                                    action =
+                                        IntercomAudioService.ACTION_PLAY_FRAME
                                     putExtra(
                                         IntercomAudioService.EXTRA_AUDIO_BYTES,
                                         audioBytes
                                     )
                                 }
+
                                 startService(playIntent)
                             }
                         }
@@ -190,10 +229,17 @@ class MainActivity : ComponentActivity() {
                             context: android.content.Context,
                             intent: Intent
                         ) {
-                            if (intent.action != IntercomAudioService.ACTION_AUDIO_FRAME) return
+                            if (
+                                intent.action !=
+                                IntercomAudioService.ACTION_AUDIO_FRAME
+                            ) {
+                                return
+                            }
+
                             val audioBytes = intent.getByteArrayExtra(
                                 IntercomAudioService.EXTRA_AUDIO_BYTES
                             ) ?: return
+
                             intercomManager.sendAudioFrame(audioBytes)
                         }
                     }
@@ -201,7 +247,9 @@ class MainActivity : ComponentActivity() {
                     ContextCompat.registerReceiver(
                         this@MainActivity,
                         audioFrameReceiver,
-                        IntentFilter(IntercomAudioService.ACTION_AUDIO_FRAME),
+                        IntentFilter(
+                            IntercomAudioService.ACTION_AUDIO_FRAME
+                        ),
                         ContextCompat.RECEIVER_NOT_EXPORTED
                     )
 
@@ -209,46 +257,97 @@ class MainActivity : ComponentActivity() {
                         try {
                             unregisterReceiver(audioFrameReceiver)
                         } catch (_: IllegalArgumentException) {
+                            // Already unregistered.
                         }
+
                         intercomManager.stopAll()
+
                         stopService(
-                            Intent(this@MainActivity, IntercomAudioService::class.java)
+                            Intent(
+                                this@MainActivity,
+                                IntercomAudioService::class.java
+                            )
                         )
                     }
                 }
 
+                // Request all permissions reported as missing by Nearby Connections.
                 val intercomPermissions = remember {
                     buildList {
                         add(Manifest.permission.RECORD_AUDIO)
+                        add(Manifest.permission.ACCESS_COARSE_LOCATION)
+                        add(Manifest.permission.ACCESS_FINE_LOCATION)
+
                         if (Build.VERSION.SDK_INT >= 31) {
                             add(Manifest.permission.BLUETOOTH_SCAN)
                             add(Manifest.permission.BLUETOOTH_ADVERTISE)
                             add(Manifest.permission.BLUETOOTH_CONNECT)
-                        } else {
-                            add(Manifest.permission.ACCESS_COARSE_LOCATION)
-                            add(Manifest.permission.ACCESS_FINE_LOCATION)
                         }
+
                         if (Build.VERSION.SDK_INT >= 33) {
                             add(Manifest.permission.NEARBY_WIFI_DEVICES)
                         }
                     }
                 }
 
-                var pendingIntercomAction by remember { mutableStateOf("") }
+                var pendingIntercomAction by remember {
+                    mutableStateOf("")
+                }
 
                 val intercomPermissionLauncher =
                     rememberLauncherForActivityResult(
                         ActivityResultContracts.RequestMultiplePermissions()
-                    ) { results ->
-                        if (results.values.all { it }) {
+                    ) { _ ->
+                        val allGranted = intercomPermissions.all { permission ->
+                            ContextCompat.checkSelfPermission(
+                                this@MainActivity,
+                                permission
+                            ) == PackageManager.PERMISSION_GRANTED
+                        }
+
+                        if (allGranted) {
                             when (pendingIntercomAction) {
-                                "host" -> intercomManager.startAdvertising(intercomDeviceName)
-                                "discover" -> intercomManager.startDiscovery()
+                                "host" -> {
+                                    intercomManager.startAdvertising(
+                                        intercomDeviceName
+                                    )
+                                }
+
+                                "discover" -> {
+                                    intercomManager.startDiscovery()
+                                }
                             }
                         } else {
-                            intercomStatus.value =
-                                "Nearby/microphone permission denied. Check App Settings."
+                            val missingPermissions =
+                                intercomPermissions.filter { permission ->
+                                    ContextCompat.checkSelfPermission(
+                                        this@MainActivity,
+                                        permission
+                                    ) != PackageManager.PERMISSION_GRANTED
+                                }
+
+                            intercomStatus.value = when {
+                                missingPermissions.contains(
+                                    Manifest.permission.ACCESS_FINE_LOCATION
+                                ) ||
+                                        missingPermissions.contains(
+                                            Manifest.permission.ACCESS_COARSE_LOCATION
+                                        ) -> {
+                                    "Location permission missing. Check SyncAudio app permissions."
+                                }
+
+                                missingPermissions.contains(
+                                    Manifest.permission.RECORD_AUDIO
+                                ) -> {
+                                    "Microphone permission required."
+                                }
+
+                                else -> {
+                                    "Nearby permissions missing. Check SyncAudio app settings."
+                                }
+                            }
                         }
+
                         pendingIntercomAction = ""
                     }
 
@@ -288,7 +387,9 @@ class MainActivity : ComponentActivity() {
                                 switchToSender()
                                 startSender()
                             } else {
-                                senderPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                senderPermissionLauncher.launch(
+                                    Manifest.permission.RECORD_AUDIO
+                                )
                             }
                         },
 
@@ -298,28 +399,42 @@ class MainActivity : ComponentActivity() {
                         },
 
                         onHostClick = {
-                            val missing = intercomPermissions.filter {
-                                ContextCompat.checkSelfPermission(this@MainActivity, it) !=
-                                        PackageManager.PERMISSION_GRANTED
-                            }
-                            if (missing.isEmpty()) {
-                                intercomManager.startAdvertising(intercomDeviceName)
+                            val missingPermissions =
+                                intercomPermissions.filter { permission ->
+                                    ContextCompat.checkSelfPermission(
+                                        this@MainActivity,
+                                        permission
+                                    ) != PackageManager.PERMISSION_GRANTED
+                                }
+
+                            if (missingPermissions.isEmpty()) {
+                                intercomManager.startAdvertising(
+                                    intercomDeviceName
+                                )
                             } else {
                                 pendingIntercomAction = "host"
-                                intercomPermissionLauncher.launch(missing.toTypedArray())
+                                intercomPermissionLauncher.launch(
+                                    missingPermissions.toTypedArray()
+                                )
                             }
                         },
 
                         onDiscoverClick = {
-                            val missing = intercomPermissions.filter {
-                                ContextCompat.checkSelfPermission(this@MainActivity, it) !=
-                                        PackageManager.PERMISSION_GRANTED
-                            }
-                            if (missing.isEmpty()) {
+                            val missingPermissions =
+                                intercomPermissions.filter { permission ->
+                                    ContextCompat.checkSelfPermission(
+                                        this@MainActivity,
+                                        permission
+                                    ) != PackageManager.PERMISSION_GRANTED
+                                }
+
+                            if (missingPermissions.isEmpty()) {
                                 intercomManager.startDiscovery()
                             } else {
                                 pendingIntercomAction = "discover"
-                                intercomPermissionLauncher.launch(missing.toTypedArray())
+                                intercomPermissionLauncher.launch(
+                                    missingPermissions.toTypedArray()
+                                )
                             }
                         },
 
@@ -332,27 +447,36 @@ class MainActivity : ComponentActivity() {
 
                         onStartAudio = {
                             if (connectedIntercomDevices.isEmpty()) {
-                                intercomStatus.value = "Connect to a device before starting audio"
+                                intercomStatus.value =
+                                    "Connect to a device before starting audio"
                             } else {
-                                val hasMicPermission = ContextCompat.checkSelfPermission(
-                                    this@MainActivity,
-                                    Manifest.permission.RECORD_AUDIO
-                                ) == PackageManager.PERMISSION_GRANTED
+                                val hasMicPermission =
+                                    ContextCompat.checkSelfPermission(
+                                        this@MainActivity,
+                                        Manifest.permission.RECORD_AUDIO
+                                    ) == PackageManager.PERMISSION_GRANTED
 
                                 if (!hasMicPermission) {
-                                    intercomStatus.value = "Grant microphone permission first"
+                                    intercomStatus.value =
+                                        "Grant microphone permission first"
                                 } else {
                                     try {
                                         val serviceIntent = Intent(
                                             this@MainActivity,
                                             IntercomAudioService::class.java
-                                        ).setAction(IntercomAudioService.ACTION_START)
+                                        ).setAction(
+                                            IntercomAudioService.ACTION_START
+                                        )
+
                                         ContextCompat.startForegroundService(
                                             this@MainActivity,
                                             serviceIntent
                                         )
+
                                         intercomAudioStarted = true
-                                        intercomStatus.value = "Starting hands-free audio..."
+                                        intercomStatus.value =
+                                            "Starting hands-free audio..."
+
                                         addEvent("Intercom audio start requested")
                                     } catch (error: Exception) {
                                         intercomStatus.value =
@@ -364,8 +488,12 @@ class MainActivity : ComponentActivity() {
 
                         onStopAudio = {
                             stopService(
-                                Intent(this@MainActivity, IntercomAudioService::class.java)
+                                Intent(
+                                    this@MainActivity,
+                                    IntercomAudioService::class.java
+                                )
                             )
+
                             intercomAudioStarted = false
                             intercomStatus.value = "Hands-free audio stopped"
                             addEvent("Intercom audio stopped")
@@ -373,8 +501,12 @@ class MainActivity : ComponentActivity() {
 
                         onStopIntercom = {
                             stopService(
-                                Intent(this@MainActivity, IntercomAudioService::class.java)
+                                Intent(
+                                    this@MainActivity,
+                                    IntercomAudioService::class.java
+                                )
                             )
+
                             intercomAudioStarted = false
                             intercomManager.stopAll()
                             intercomStatus.value = "Intercom stopped"

@@ -1,3 +1,4 @@
+
 package com.example.syncaudio
 
 import android.content.Context
@@ -52,10 +53,23 @@ class NearbyIntercomManager(
     }
 
     private val payloadCallback = object : PayloadCallback() {
-        override fun onPayloadReceived(endpointId: String, payload: Payload) {
+
+        override fun onPayloadReceived(
+            endpointId: String,
+            payload: Payload
+        ) {
             when (payload.type) {
                 Payload.Type.BYTES -> {
-                    val bytes = payload.asBytes() ?: return
+                    val bytes = payload.asBytes()
+
+                    if (bytes == null) {
+                        Log.e(
+                            TAG,
+                            "Received BYTES payload but data is null from $endpointId"
+                        )
+                        return
+                    }
+
                     val isAudioFrame =
                         bytes.size > AUDIO_MAGIC.size &&
                                 bytes.copyOfRange(0, AUDIO_MAGIC.size)
@@ -66,20 +80,39 @@ class NearbyIntercomManager(
                             AUDIO_MAGIC.size,
                             bytes.size
                         )
+
+                        Log.d(
+                            TAG,
+                            "AUDIO_RECEIVED: from=$endpointId, " +
+                                    "packetBytes=${bytes.size}, " +
+                                    "audioBytes=${audioBytes.size}"
+                        )
+
                         onAudioFrame(endpointId, audioBytes)
                     } else {
                         val message = bytes.toString(Charsets.UTF_8)
-                        Log.d(TAG, "Received data from $endpointId: $message")
+
+                        Log.d(
+                            TAG,
+                            "Received text/data from $endpointId: $message"
+                        )
+
                         onStatus("Data received from connected device")
                     }
                 }
 
                 Payload.Type.STREAM -> {
-                    Log.d(TAG, "Stream payload received from $endpointId")
+                    Log.d(
+                        TAG,
+                        "Stream payload received from $endpointId"
+                    )
                 }
 
                 Payload.Type.FILE -> {
-                    Log.d(TAG, "File payload received from $endpointId")
+                    Log.d(
+                        TAG,
+                        "File payload received from $endpointId"
+                    )
                 }
             }
         }
@@ -89,66 +122,92 @@ class NearbyIntercomManager(
             update: PayloadTransferUpdate
         ) {
             when (update.status) {
-                PayloadTransferUpdate.Status.SUCCESS ->
+                PayloadTransferUpdate.Status.SUCCESS -> {
                     Log.d(TAG, "Payload sent to $endpointId")
+                }
 
                 PayloadTransferUpdate.Status.FAILURE -> {
-                    Log.e(TAG, "Payload transfer failed: $endpointId")
+                    Log.e(
+                        TAG,
+                        "Payload transfer failed: $endpointId"
+                    )
                     onStatus("Data transmission failed")
                 }
 
                 PayloadTransferUpdate.Status.IN_PROGRESS -> Unit
 
-                PayloadTransferUpdate.Status.CANCELED ->
-                    Log.w(TAG, "Payload transfer cancelled: $endpointId")
+                PayloadTransferUpdate.Status.CANCELED -> {
+                    Log.w(
+                        TAG,
+                        "Payload transfer cancelled: $endpointId"
+                    )
+                }
             }
         }
     }
 
     private val discoveryCallback = object : EndpointDiscoveryCallback() {
+
         override fun onEndpointFound(
             endpointId: String,
             info: DiscoveredEndpointInfo
         ) {
             discoveredDevices[endpointId] =
                 IntercomDevice(endpointId, info.endpointName)
-            Log.d(TAG, "Found device: ${info.endpointName}")
+
+            Log.d(
+                TAG,
+                "Found device: ${info.endpointName}, endpoint=$endpointId"
+            )
+
             publishDevices()
             onStatus("Found device: ${info.endpointName}")
         }
 
         override fun onEndpointLost(endpointId: String) {
             discoveredDevices.remove(endpointId)
+
             publishDevices()
             onStatus("Device no longer visible")
+
             Log.d(TAG, "Endpoint lost: $endpointId")
         }
     }
 
     private val connectionCallback = object : ConnectionLifecycleCallback() {
+
         override fun onConnectionInitiated(
             endpointId: String,
             connectionInfo: ConnectionInfo
         ) {
             val deviceName = connectionInfo.endpointName
-            discoveredDevices[endpointId] = IntercomDevice(endpointId, deviceName)
+
+            discoveredDevices[endpointId] =
+                IntercomDevice(endpointId, deviceName)
+
             publishDevices()
             onStatus("Connection request from $deviceName")
+
             client.acceptConnection(
                 endpointId,
                 payloadCallback
             ).addOnSuccessListener {
                 Log.d(
                     TAG,
-                    "ACCEPT_SUCCESS: accepted request from $deviceName ($endpointId)"
+                    "ACCEPT_SUCCESS: accepted request from " +
+                            "$deviceName ($endpointId)"
                 )
-                onStatus("Request accepted from $deviceName; completing connection...")
+
+                onStatus(
+                    "Request accepted from $deviceName; completing connection..."
+                )
             }.addOnFailureListener { error ->
                 Log.e(
                     TAG,
                     "ACCEPT_FAILED: could not accept request from $deviceName",
                     error
                 )
+
                 onStatus("Accept failed: ${error.message}")
             }
         }
@@ -160,11 +219,17 @@ class NearbyIntercomManager(
             if (result.status.isSuccess) {
                 connectedEndpoints.add(endpointId)
                 publishConnections()
-                val deviceName = discoveredDevices[endpointId]?.name ?: "Nearby device"
+
+                val deviceName =
+                    discoveredDevices[endpointId]?.name ?: "Nearby device"
+
                 onStatus("Connected to $deviceName")
                 Log.d(TAG, "Connected: $endpointId")
             } else {
-                onStatus("Connection failed: ${result.status.statusCode}")
+                onStatus(
+                    "Connection failed: ${result.status.statusCode}"
+                )
+
                 Log.e(
                     TAG,
                     "CONNECTION_RESULT_FAILED: endpoint=$endpointId, " +
@@ -176,6 +241,7 @@ class NearbyIntercomManager(
         override fun onDisconnected(endpointId: String) {
             connectedEndpoints.remove(endpointId)
             publishConnections()
+
             onStatus("Device disconnected")
             Log.d(TAG, "Disconnected: $endpointId")
         }
@@ -186,24 +252,29 @@ class NearbyIntercomManager(
             onStatus("Already hosting an intercom room")
             return
         }
+
         isAdvertising = true
         onStatus("Starting intercom host...")
+
         client.startAdvertising(
             deviceName,
             SERVICE_ID,
             connectionCallback,
-            AdvertisingOptions.Builder().setStrategy(Strategy.P2P_CLUSTER).build()
+            AdvertisingOptions.Builder()
+                .setStrategy(Strategy.P2P_CLUSTER)
+                .build()
         ).addOnSuccessListener {
             onStatus("Hosting intercom room: $deviceName")
+            Log.d(TAG, "Advertising started: $deviceName")
         }.addOnFailureListener { error ->
             isAdvertising = false
+
             Log.e(TAG, "Advertising failed", error)
             onStatus("Advertising failed: ${error.message}")
         }
     }
 
     fun startDiscovery() {
-        // Restart discovery so a previous search cannot block a new one.
         client.stopDiscovery()
         isDiscovering = false
 
@@ -230,13 +301,36 @@ class NearbyIntercomManager(
         }
     }
 
-    fun requestConnection(endpointId: String, deviceName: String = "SyncAudio") {
+    fun requestConnection(
+        endpointId: String,
+        deviceName: String = "SyncAudio"
+    ) {
+        if (endpointId in connectedEndpoints) {
+            Log.d(
+                TAG,
+                "Connection request skipped; already connected: $endpointId"
+            )
+            onStatus("Device is already connected")
+            return
+        }
+
         onStatus("Requesting connection...")
-        client.requestConnection(deviceName, endpointId, connectionCallback)
-            .addOnFailureListener { error ->
-                Log.e(TAG, "Connection request failed", error)
-                onStatus("Connection request failed: ${error.message}")
-            }
+
+        client.requestConnection(
+            deviceName,
+            endpointId,
+            connectionCallback
+        ).addOnSuccessListener {
+            Log.d(TAG, "Connection request initiated: $endpointId")
+        }.addOnFailureListener { error ->
+            Log.e(
+                TAG,
+                "Connection request failed: $endpointId",
+                error
+            )
+
+            onStatus("Connection request failed: ${error.message}")
+        }
     }
 
     fun sendText(endpointId: String, message: String) {
@@ -244,6 +338,7 @@ class NearbyIntercomManager(
             onStatus("Cannot send: device is not connected")
             return
         }
+
         client.sendPayload(
             endpointId,
             Payload.fromBytes(message.toByteArray(Charsets.UTF_8))
@@ -255,30 +350,43 @@ class NearbyIntercomManager(
 
     fun sendAudioFrame(audioBytes: ByteArray) {
         if (connectedEndpoints.isEmpty()) return
+
         val packet = AUDIO_MAGIC + audioBytes
+
         connectedEndpoints.toList().forEach { endpointId ->
-            client.sendPayload(endpointId, Payload.fromBytes(packet))
-                .addOnFailureListener { error ->
-                    Log.e(TAG, "Audio frame send failed", error)
-                }
+            client.sendPayload(
+                endpointId,
+                Payload.fromBytes(packet)
+            ).addOnFailureListener { error ->
+                Log.e(
+                    TAG,
+                    "Audio frame send failed to $endpointId",
+                    error
+                )
+            }
         }
     }
 
     fun getDiscoveredDevices(): List<IntercomDevice> =
         discoveredDevices.values.toList()
 
-    fun getConnectedEndpoints(): List<String> = connectedEndpoints.toList()
+    fun getConnectedEndpoints(): List<String> =
+        connectedEndpoints.toList()
 
     fun stopAll() {
         client.stopAdvertising()
         client.stopDiscovery()
         client.stopAllEndpoints()
+
         isAdvertising = false
         isDiscovering = false
+
         discoveredDevices.clear()
         connectedEndpoints.clear()
+
         publishDevices()
         publishConnections()
+
         onStatus("Intercom stopped")
         Log.d(TAG, "Intercom stopped")
     }

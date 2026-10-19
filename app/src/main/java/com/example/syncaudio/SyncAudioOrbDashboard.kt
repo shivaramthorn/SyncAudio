@@ -13,6 +13,8 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -89,15 +91,15 @@ fun SyncAudioOrbDashboard(
                     listOf(Color(0xFF030711), SyncBg, Color(0xFF080D20))
                 )
             )
-            .windowInsetsPadding(
-                WindowInsets.safeDrawing.only(WindowInsetsSides.Top)
-            )
+            .windowInsetsPadding(WindowInsets.safeDrawing)
             .padding(horizontal = 18.dp, vertical = 14.dp)
     ) {
         val compact = maxHeight < 700.dp
 
         Column(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Row(
@@ -720,3 +722,4 @@ private fun OrbButton(
         }
     }
 }
+
