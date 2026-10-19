@@ -12,22 +12,22 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.*
 import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.core.content.ContextCompat
 
 class MainActivity : ComponentActivity() {
+
     private var audioReceiver: AudioReceiver? = null
+
     private var dashboardStatus by mutableStateOf("Ready")
     private var senderStatus by mutableStateOf("Not started")
     private var receiverStatus by mutableStateOf("Not connected")
+
     private val eventLog = mutableStateListOf<String>()
 
     private fun addEvent(message: String) {
@@ -35,6 +35,7 @@ class MainActivity : ComponentActivity() {
             "HH:mm:ss",
             java.util.Locale.getDefault()
         ).format(java.util.Date())
+
         eventLog.add(0, "$time  $message")
         while (eventLog.size > 30) eventLog.removeAt(eventLog.lastIndex)
     }
@@ -70,13 +71,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private val projectionLauncher =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        registerForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { result ->
             if (result.resultCode == RESULT_OK && result.data != null) {
                 val serviceIntent = Intent(this, AudioCaptureService::class.java).apply {
                     action = AudioCaptureService.ACTION_START
                     putExtra(AudioCaptureService.EXTRA_RESULT_CODE, result.resultCode)
                     putExtra(AudioCaptureService.EXTRA_RESULT_DATA, result.data)
                 }
+
                 ContextCompat.startForegroundService(this, serviceIntent)
                 senderStatus = "Capture service requested"
                 dashboardStatus = "Sender starting"
@@ -107,6 +111,7 @@ class MainActivity : ComponentActivity() {
         receiverStatus = "Searching for sender"
         dashboardStatus = "Discovering SyncAudio sender"
         addEvent("Automatic sender discovery requested")
+
         audioReceiver = AudioReceiver(
             context = this,
             onStatus = { status ->
@@ -152,7 +157,10 @@ class MainActivity : ComponentActivity() {
                                 connectedIntercomDevices.addAll(endpoints)
                                 if (endpoints.isEmpty() && intercomAudioStarted) {
                                     stopService(
-                                        Intent(this@MainActivity, IntercomAudioService::class.java)
+                                        Intent(
+                                            this@MainActivity,
+                                            IntercomAudioService::class.java
+                                        )
                                     )
                                     intercomAudioStarted = false
                                 }
@@ -227,6 +235,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 var pendingIntercomAction by remember { mutableStateOf("") }
+
                 val intercomPermissionLauncher =
                     rememberLauncherForActivityResult(
                         ActivityResultContracts.RequestMultiplePermissions()
@@ -243,192 +252,88 @@ class MainActivity : ComponentActivity() {
                         pendingIntercomAction = ""
                     }
 
+                val senderPermissionLauncher =
+                    rememberLauncherForActivityResult(
+                        ActivityResultContracts.RequestPermission()
+                    ) { granted ->
+                        if (granted) {
+                            switchToSender()
+                            startSender()
+                        } else {
+                            dashboardStatus = "Audio permission denied"
+                            senderStatus = "Permission denied"
+                            addEvent("Audio permission denied")
+                        }
+                    }
+
                 Box(modifier = Modifier.fillMaxSize()) {
                     ParticleFlow(modifier = Modifier.fillMaxSize())
-                    var selectedMode by remember { mutableStateOf("Receiver") }
 
-                    val permissionLauncher =
-                        rememberLauncherForActivityResult(
-                            ActivityResultContracts.RequestPermission()
-                        ) { granted ->
-                            if (granted) startSender() else {
-                                dashboardStatus = "Audio permission denied"
-                                senderStatus = "Permission denied"
-                                addEvent("Audio permission denied")
+                    SyncAudioOrbDashboard(
+                        senderStatus = senderStatus,
+                        receiverStatus = receiverStatus,
+                        intercomStatus = intercomStatus.value,
+                        roomName = intercomDeviceName,
+                        devices = intercomDevices.toList(),
+                        connectedDevices = connectedIntercomDevices.toList(),
+                        audioStarted = intercomAudioStarted,
+
+                        onSenderClick = {
+                            val granted = ContextCompat.checkSelfPermission(
+                                this@MainActivity,
+                                Manifest.permission.RECORD_AUDIO
+                            ) == PackageManager.PERMISSION_GRANTED
+
+                            if (granted) {
+                                switchToSender()
+                                startSender()
+                            } else {
+                                senderPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             }
-                        }
+                        },
 
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .verticalScroll(rememberScrollState())
-                            .padding(20.dp),
-                        verticalArrangement = Arrangement.spacedBy(14.dp)
-                    ) {
-                        Text("SyncAudio", style = MaterialTheme.typography.headlineLarge)
-                        Text("V1.3 • Intercom Audio Prototype", style = MaterialTheme.typography.bodyMedium)
+                        onReceiverClick = {
+                            switchToReceiver()
+                            startReceiver()
+                        },
 
-                        Card(modifier = Modifier.fillMaxWidth()) {
-                            Column(
-                                modifier = Modifier.padding(16.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Text("Dashboard status", style = MaterialTheme.typography.titleMedium)
-                                Text(dashboardStatus)
-                                HorizontalDivider()
-                                Text("Sender: $senderStatus")
-                                Text("Receiver: $receiverStatus")
+                        onHostClick = {
+                            val missing = intercomPermissions.filter {
+                                ContextCompat.checkSelfPermission(this@MainActivity, it) !=
+                                        PackageManager.PERMISSION_GRANTED
                             }
-                        }
+                            if (missing.isEmpty()) {
+                                intercomManager.startAdvertising(intercomDeviceName)
+                            } else {
+                                pendingIntercomAction = "host"
+                                intercomPermissionLauncher.launch(missing.toTypedArray())
+                            }
+                        },
 
-                        Text("MUSIC STREAMING", style = MaterialTheme.typography.titleLarge)
-                        Text(
-                            "These Sender/Receiver controls are for music streaming only. They do not set the intercom role.",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        Text("Choose this phone's music role", style = MaterialTheme.typography.titleMedium)
+                        onDiscoverClick = {
+                            val missing = intercomPermissions.filter {
+                                ContextCompat.checkSelfPermission(this@MainActivity, it) !=
+                                        PackageManager.PERMISSION_GRANTED
+                            }
+                            if (missing.isEmpty()) {
+                                intercomManager.startDiscovery()
+                            } else {
+                                pendingIntercomAction = "discover"
+                                intercomPermissionLauncher.launch(missing.toTypedArray())
+                            }
+                        },
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            FilterChip(
-                                selected = selectedMode == "Sender",
-                                onClick = {
-                                    switchToSender()
-                                    selectedMode = "Sender"
-                                },
-                                label = { Text("Sender") }
+                        onConnectDevice = { device ->
+                            intercomManager.requestConnection(
+                                endpointId = device.endpointId,
+                                deviceName = intercomDeviceName
                             )
-                            FilterChip(
-                                selected = selectedMode == "Receiver",
-                                onClick = {
-                                    switchToReceiver()
-                                    selectedMode = "Receiver"
-                                },
-                                label = { Text("Receiver") }
-                            )
-                        }
+                        },
 
-                        if (selectedMode == "Sender") {
-                            Text("Use this phone to capture and send audio.")
-                            Button(
-                                modifier = Modifier.fillMaxWidth(),
-                                onClick = {
-                                    val granted = ContextCompat.checkSelfPermission(
-                                        this@MainActivity,
-                                        Manifest.permission.RECORD_AUDIO
-                                    ) == PackageManager.PERMISSION_GRANTED
-                                    if (granted) startSender()
-                                    else {
-                                        stopReceiver()
-                                        permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                    }
-                                }
-                            ) { Text("Start Audio Capture") }
-                        } else {
-                            Text("Search this Wi-Fi/hotspot network for a sender and play its audio.")
-                            Button(
-                                modifier = Modifier.fillMaxWidth(),
-                                onClick = { startReceiver() }
-                            ) { Text("Find Sender & Start Receiver") }
-                            Button(
-                                modifier = Modifier.fillMaxWidth(),
-                                onClick = {
-                                    stopReceiver()
-                                    dashboardStatus = "Receiver stopped"
-                                }
-                            ) { Text("Stop Receiver") }
-                        }
-
-                        HorizontalDivider()
-                        Text("INTERCOM (SEPARATE FROM MUSIC)", style = MaterialTheme.typography.titleLarge)
-                        Text(
-                            "Connect two phones first, then start hands-free audio on both.",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-
-                        Card(modifier = Modifier.fillMaxWidth()) {
-                            Column(
-                                modifier = Modifier.padding(16.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Text("Intercom Room Status", style = MaterialTheme.typography.titleMedium)
-                                Text(intercomStatus.value)
-                                HorizontalDivider()
-                                Text("Device name: $intercomDeviceName")
-                                Text("Connected devices: ${connectedIntercomDevices.size}")
-                                if (connectedIntercomDevices.isEmpty()) {
-                                    Text("No active connections")
-                                } else {
-                                    connectedIntercomDevices.forEach { endpointId ->
-                                        val name = intercomDevices
-                                            .firstOrNull { it.endpointId == endpointId }
-                                            ?.name ?: endpointId
-                                        Text("Connected: $name")
-                                    }
-                                }
-                                HorizontalDivider()
-                                Text(
-                                    if (intercomAudioStarted) "Audio transmission: Starting/active"
-                                    else "Audio transmission: Stopped",
-                                    color = MaterialTheme.colorScheme.secondary
-                                )
-                            }
-                        }
-
-                        Button(
-                            modifier = Modifier.fillMaxWidth(),
-                            onClick = {
-                                val missing = intercomPermissions.filter {
-                                    ContextCompat.checkSelfPermission(this@MainActivity, it) !=
-                                            PackageManager.PERMISSION_GRANTED
-                                }
-                                if (missing.isEmpty()) {
-                                    intercomManager.startAdvertising(intercomDeviceName)
-                                } else {
-                                    pendingIntercomAction = "host"
-                                    intercomPermissionLauncher.launch(missing.toTypedArray())
-                                }
-                            }
-                        ) { Text("Host Intercom Room") }
-
-                        Button(
-                            modifier = Modifier.fillMaxWidth(),
-                            onClick = {
-                                val missing = intercomPermissions.filter {
-                                    ContextCompat.checkSelfPermission(this@MainActivity, it) !=
-                                            PackageManager.PERMISSION_GRANTED
-                                }
-                                if (missing.isEmpty()) intercomManager.startDiscovery()
-                                else {
-                                    pendingIntercomAction = "discover"
-                                    intercomPermissionLauncher.launch(missing.toTypedArray())
-                                }
-                            }
-                        ) { Text("Find Intercom Devices") }
-
-                        if (intercomDevices.isEmpty()) {
-                            Text("No nearby intercom devices found yet.")
-                        } else {
-                            Text("Available devices", style = MaterialTheme.typography.titleMedium)
-                            intercomDevices.forEach { device ->
-                                OutlinedButton(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    onClick = {
-                                        intercomManager.requestConnection(
-                                            endpointId = device.endpointId,
-                                            deviceName = intercomDeviceName
-                                        )
-                                    }
-                                ) { Text("Connect to ${device.name}") }
-                            }
-                        }
-
-                        Button(
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = connectedIntercomDevices.isNotEmpty() && !intercomAudioStarted,
-                            onClick = {
+                        onStartAudio = {
+                            if (connectedIntercomDevices.isEmpty()) {
+                                intercomStatus.value = "Connect to a device before starting audio"
+                            } else {
                                 val hasMicPermission = ContextCompat.checkSelfPermission(
                                     this@MainActivity,
                                     Manifest.permission.RECORD_AUDIO
@@ -442,64 +347,40 @@ class MainActivity : ComponentActivity() {
                                             this@MainActivity,
                                             IntercomAudioService::class.java
                                         ).setAction(IntercomAudioService.ACTION_START)
-                                        ContextCompat.startForegroundService(this@MainActivity, serviceIntent)
+                                        ContextCompat.startForegroundService(
+                                            this@MainActivity,
+                                            serviceIntent
+                                        )
                                         intercomAudioStarted = true
                                         intercomStatus.value = "Starting hands-free audio..."
                                         addEvent("Intercom audio start requested")
                                     } catch (error: Exception) {
-                                        intercomStatus.value = "Could not start audio: ${error.message}"
+                                        intercomStatus.value =
+                                            "Could not start audio: ${error.message}"
                                     }
                                 }
                             }
-                        ) { Text("Start Hands-Free Audio") }
+                        },
 
-                        OutlinedButton(
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = intercomAudioStarted,
-                            onClick = {
-                                stopService(Intent(this@MainActivity, IntercomAudioService::class.java))
-                                intercomAudioStarted = false
-                                intercomStatus.value = "Hands-free audio stopped"
-                                addEvent("Intercom audio stopped")
-                            }
-                        ) { Text("Stop Hands-Free Audio") }
+                        onStopAudio = {
+                            stopService(
+                                Intent(this@MainActivity, IntercomAudioService::class.java)
+                            )
+                            intercomAudioStarted = false
+                            intercomStatus.value = "Hands-free audio stopped"
+                            addEvent("Intercom audio stopped")
+                        },
 
-                        OutlinedButton(
-                            modifier = Modifier.fillMaxWidth(),
-                            onClick = {
-                                stopService(Intent(this@MainActivity, IntercomAudioService::class.java))
-                                intercomAudioStarted = false
-                                intercomManager.stopAll()
-                            }
-                        ) { Text("Stop Intercom") }
-
-                        HorizontalDivider()
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text("Recent events", style = MaterialTheme.typography.titleMedium)
-                            TextButton(
-                                onClick = {
-                                    eventLog.clear()
-                                    addEvent("Event log cleared")
-                                }
-                            ) { Text("Clear") }
+                        onStopIntercom = {
+                            stopService(
+                                Intent(this@MainActivity, IntercomAudioService::class.java)
+                            )
+                            intercomAudioStarted = false
+                            intercomManager.stopAll()
+                            intercomStatus.value = "Intercom stopped"
+                            addEvent("Intercom stopped")
                         }
-
-                        Card(modifier = Modifier.fillMaxWidth()) {
-                            Column(
-                                modifier = Modifier.padding(12.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                if (eventLog.isEmpty()) Text("No events yet")
-                                else eventLog.take(20).forEach { event ->
-                                    Text(event, style = MaterialTheme.typography.bodySmall)
-                                }
-                            }
-                        }
-                    }
+                    )
                 }
             }
         }

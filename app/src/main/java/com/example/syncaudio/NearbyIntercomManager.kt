@@ -134,11 +134,23 @@ class NearbyIntercomManager(
             discoveredDevices[endpointId] = IntercomDevice(endpointId, deviceName)
             publishDevices()
             onStatus("Connection request from $deviceName")
-            client.acceptConnection(endpointId, payloadCallback)
-                .addOnFailureListener { error ->
-                    Log.e(TAG, "Could not accept connection", error)
-                    onStatus("Accept connection failed: ${error.message}")
-                }
+            client.acceptConnection(
+                endpointId,
+                payloadCallback
+            ).addOnSuccessListener {
+                Log.d(
+                    TAG,
+                    "ACCEPT_SUCCESS: accepted request from $deviceName ($endpointId)"
+                )
+                onStatus("Request accepted from $deviceName; completing connection...")
+            }.addOnFailureListener { error ->
+                Log.e(
+                    TAG,
+                    "ACCEPT_FAILED: could not accept request from $deviceName",
+                    error
+                )
+                onStatus("Accept failed: ${error.message}")
+            }
         }
 
         override fun onConnectionResult(
@@ -153,7 +165,11 @@ class NearbyIntercomManager(
                 Log.d(TAG, "Connected: $endpointId")
             } else {
                 onStatus("Connection failed: ${result.status.statusCode}")
-                Log.w(TAG, "Connection failed: ${result.status.statusCode}")
+                Log.e(
+                    TAG,
+                    "CONNECTION_RESULT_FAILED: endpoint=$endpointId, " +
+                            "statusCode=${result.status.statusCode}"
+                )
             }
         }
 
@@ -187,20 +203,28 @@ class NearbyIntercomManager(
     }
 
     fun startDiscovery() {
-        if (isDiscovering) {
-            onStatus("Already searching for nearby devices")
-            return
-        }
+        // Restart discovery so a previous search cannot block a new one.
+        client.stopDiscovery()
+        isDiscovering = false
+
+        discoveredDevices.clear()
+        publishDevices()
+
         isDiscovering = true
-        onStatus("Starting nearby device search...")
+        onStatus("Searching for nearby intercom devices...")
+
         client.startDiscovery(
             SERVICE_ID,
             discoveryCallback,
-            DiscoveryOptions.Builder().setStrategy(Strategy.P2P_CLUSTER).build()
+            DiscoveryOptions.Builder()
+                .setStrategy(Strategy.P2P_CLUSTER)
+                .build()
         ).addOnSuccessListener {
-            onStatus("Searching for nearby intercom devices")
+            onStatus("Search active — looking for SyncAudio hosts")
+            Log.d(TAG, "Discovery started successfully")
         }.addOnFailureListener { error ->
             isDiscovering = false
+
             Log.e(TAG, "Discovery failed", error)
             onStatus("Discovery failed: ${error.message}")
         }
