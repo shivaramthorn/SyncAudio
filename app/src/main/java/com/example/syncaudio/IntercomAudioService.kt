@@ -1,4 +1,3 @@
-
 package com.example.syncaudio
 
 import android.app.Notification
@@ -14,6 +13,9 @@ import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.media.AudioDeviceCallback
+import android.os.Handler
+import android.os.Looper
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -35,6 +37,18 @@ class IntercomAudioService : Service() {
         const val ACTION_AUDIO_FRAME =
             "com.example.syncaudio.intercom.AUDIO_FRAME"
         const val EXTRA_AUDIO_BYTES = "audio_bytes"
+
+        const val ACTION_SET_AUDIO_ROUTE = "com.example.syncaudio.intercom.SET_AUDIO_ROUTE"
+        const val ACTION_AUDIO_ROUTES_CHANGED = "com.example.syncaudio.intercom.AUDIO_ROUTES_CHANGED"
+        const val ACTION_AUDIO_ROUTE_CHANGED = "com.example.syncaudio.intercom.AUDIO_ROUTE_CHANGED"
+        const val EXTRA_AUDIO_ROUTE_TYPE = "audio_route_type"
+        const val EXTRA_AUDIO_ROUTE_ID = "audio_route_id"
+        const val EXTRA_AUDIO_ROUTE_NAME = "audio_route_name"
+        const val EXTRA_AUDIO_ROUTES = "audio_routes"
+        const val EXTRA_SELECTED_ROUTE = "selected_audio_route"
+        const val ROUTE_EARPIECE = "earpiece"
+        const val ROUTE_SPEAKER = "speaker"
+        const val ROUTE_BLUETOOTH = "bluetooth"
 
         private const val CHANNEL_ID = "syncaudio_intercom"
         private const val NOTIFICATION_ID = 2101
@@ -67,9 +81,40 @@ class IntercomAudioService : Service() {
     private var previousSpeakerphone = false
     private var routeConfigured = false
 
+    @Volatile
+    private var selectedRoute = ROUTE_SPEAKER
+
+    @Volatile
+    private var selectedRouteId = -1
+
+    private val audioDeviceCallback = object : AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
+            if (running.get()) broadcastAvailableRoutes()
+        }
+
+        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
+            if (running.get()) {
+                // If the selected Bluetooth device vanished, return to speaker.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                    selectedRoute == ROUTE_BLUETOOTH &&
+                    audioManager.availableCommunicationDevices.none {
+                        it.id == selectedRouteId && isBluetoothCommunicationDevice(it)
+                    }
+                ) {
+                    selectAudioRoute(ROUTE_SPEAKER, -1, null)
+                }
+                broadcastAvailableRoutes()
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        audioManager.registerAudioDeviceCallback(
+            audioDeviceCallback,
+            Handler(Looper.getMainLooper())
+        )
     }
 
     override fun onStartCommand(
@@ -86,35 +131,27 @@ class IntercomAudioService : Service() {
             }
 
             ACTION_PLAY_FRAME -> {
-                val bytes =
-                    intent.getByteArrayExtra(EXTRA_AUDIO_BYTES)
-
+                val bytes = intent.getByteArrayExtra(EXTRA_AUDIO_BYTES)
                 if (bytes != null && running.get()) {
                     if (bytes.size != FRAME_SIZE) {
-                        Log.w(
-                            TAG,
-                            "Unexpected playback frame size: ${bytes.size}"
-                        )
+                        Log.w(TAG, "Unexpected playback frame size: ${bytes.size}")
                     } else {
-                        if (playbackQueue.size >= 10) {
-                            playbackQueue.poll()
-                        }
-
+                        if (playbackQueue.size >= 10) playbackQueue.poll()
                         playbackQueue.offer(bytes)
-
                         val count = receivedFrames.incrementAndGet()
                         if (count % 25 == 0) {
-                            Log.d(
-                                TAG,
-                                "PLAY_FRAME_RECEIVED: frames=$count, " +
-                                        "bytes=${bytes.size}, " +
-                                        "rms=${measurePcm16(bytes).first}, " +
-                                        "peak=${measurePcm16(bytes).second}, " +
-                                        "queue=${playbackQueue.size}"
-                            )
+                            val metrics = measurePcm16(bytes)
+                            Log.d(TAG, "PLAY_FRAME_RECEIVED: frames=$count, bytes=${bytes.size}, rms=${metrics.first}, peak=${metrics.second}, queue=${playbackQueue.size}")
                         }
                     }
                 }
+            }
+
+            ACTION_SET_AUDIO_ROUTE -> {
+                val type = intent.getStringExtra(EXTRA_AUDIO_ROUTE_TYPE)
+                val id = intent.getIntExtra(EXTRA_AUDIO_ROUTE_ID, -1)
+                val name = intent.getStringExtra(EXTRA_AUDIO_ROUTE_NAME)
+                if (type != null) selectAudioRoute(type, id, name)
             }
         }
 
@@ -224,14 +261,8 @@ class IntercomAudioService : Service() {
                 captureLoop(newRecorder)
             }
 
-            Log.i(
-                TAG,
-                "Intercom audio started: " +
-                        "sampleRate=$SAMPLE_RATE, " +
-                        "frameSize=$FRAME_SIZE, " +
-                        "audioMode=${audioManager.mode}, " +
-                        "speakerphone=${audioManager.isSpeakerphoneOn}"
-            )
+            Log.i(TAG, "Intercom audio started: sampleRate=$SAMPLE_RATE, frameSize=$FRAME_SIZE, audioMode=${audioManager.mode}")
+            broadcastAvailableRoutes()
         } catch (error: Exception) {
             Log.e(TAG, "Could not start audio", error)
             running.set(false)
@@ -258,38 +289,147 @@ class IntercomAudioService : Service() {
 
     private fun configureCommunicationAudio() {
         previousAudioMode = audioManager.mode
-
         @Suppress("DEPRECATION")
-        run {
-            previousSpeakerphone = audioManager.isSpeakerphoneOn
-        }
+        run { previousSpeakerphone = audioManager.isSpeakerphoneOn }
 
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
         routeConfigured = true
+        // Keep the existing default behavior: start on loudspeaker.
+        selectAudioRoute(ROUTE_SPEAKER, -1, null)
+    }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val speaker = audioManager.availableCommunicationDevices
-                .firstOrNull {
-                    it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+    private fun selectAudioRoute(type: String, requestedId: Int, requestedName: String?) {
+        if (!routeConfigured && !running.get()) {
+            Log.w(TAG, "Ignoring route request because intercom audio is not running")
+            return
+        }
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val available = audioManager.availableCommunicationDevices
+                val target = when (type) {
+                    ROUTE_EARPIECE -> available.firstOrNull {
+                        it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                    }
+                    ROUTE_SPEAKER -> available.firstOrNull {
+                        it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                    }
+                    ROUTE_BLUETOOTH -> available.firstOrNull {
+                        it.id == requestedId && isBluetoothCommunicationDevice(it) &&
+                                (requestedName.isNullOrBlank() || it.productName.toString() == requestedName)
+                    } ?: available.firstOrNull { isBluetoothCommunicationDevice(it) }
+                    else -> null
                 }
 
-            if (speaker != null) {
-                val selected =
-                    audioManager.setCommunicationDevice(speaker)
+                if (target == null) {
+                    Log.w(TAG, "Requested audio route unavailable: type=$type id=$requestedId")
+                    broadcastAvailableRoutes()
+                    return
+                }
 
-                Log.i(
-                    TAG,
-                    "Speaker route requested: selected=$selected"
-                )
+                if (audioManager.setCommunicationDevice(target)) {
+                    selectedRoute = type
+                    selectedRouteId = target.id
+                    Log.i(TAG, "Selected route: ${target.productName}, type=${target.type}, id=${target.id}")
+                    broadcastSelectedRoute(target)
+                } else {
+                    Log.w(TAG, "Android rejected audio route: ${target.productName}")
+                }
             } else {
-                Log.w(TAG, "Built-in speaker not available")
+                @Suppress("DEPRECATION")
+                when (type) {
+                    ROUTE_EARPIECE -> {
+                        audioManager.stopBluetoothSco()
+                        audioManager.isBluetoothScoOn = false
+                        audioManager.isSpeakerphoneOn = false
+                        selectedRoute = ROUTE_EARPIECE
+                        selectedRouteId = -1
+                    }
+                    ROUTE_SPEAKER -> {
+                        audioManager.stopBluetoothSco()
+                        audioManager.isBluetoothScoOn = false
+                        audioManager.isSpeakerphoneOn = true
+                        selectedRoute = ROUTE_SPEAKER
+                        selectedRouteId = -1
+                    }
+                    ROUTE_BLUETOOTH -> {
+                        audioManager.isSpeakerphoneOn = false
+                        audioManager.startBluetoothSco()
+                        audioManager.isBluetoothScoOn = true
+                        selectedRoute = ROUTE_BLUETOOTH
+                        selectedRouteId = requestedId
+                    }
+                }
+                broadcastSelectedRoute(null)
             }
-        } else {
-            @Suppress("DEPRECATION")
-            run {
-                audioManager.isSpeakerphoneOn = true
-            }
+            broadcastAvailableRoutes()
+        } catch (error: SecurityException) {
+            Log.e(TAG, "Permission denied while changing audio route", error)
+        } catch (error: Exception) {
+            Log.e(TAG, "Could not change audio route", error)
         }
+    }
+
+    private fun isBluetoothCommunicationDevice(device: AudioDeviceInfo): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
+        return device.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                device.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+                device.type == AudioDeviceInfo.TYPE_BLE_SPEAKER
+    }
+
+    private fun availableRouteStrings(): Array<String> {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            return audioManager.availableCommunicationDevices.mapNotNull { device ->
+                val type = when {
+                    device.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> ROUTE_EARPIECE
+                    device.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> ROUTE_SPEAKER
+                    isBluetoothCommunicationDevice(device) -> ROUTE_BLUETOOTH
+                    else -> null
+                } ?: return@mapNotNull null
+
+                val name = when (type) {
+                    ROUTE_EARPIECE -> "Phone earpiece"
+                    ROUTE_SPEAKER -> "Phone loudspeaker"
+                    else -> device.productName.toString().ifBlank { "Bluetooth audio" }
+                }
+                "${device.id}|$type|$name"
+            }.toTypedArray()
+        }
+
+        @Suppress("DEPRECATION")
+        val bluetoothConnected = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            .any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+
+        return buildList {
+            add("-1|$ROUTE_EARPIECE|Phone earpiece")
+            add("-2|$ROUTE_SPEAKER|Phone loudspeaker")
+            if (bluetoothConnected) add("-3|$ROUTE_BLUETOOTH|Bluetooth headset")
+        }.toTypedArray()
+    }
+
+    private fun broadcastAvailableRoutes() {
+        sendBroadcast(
+            Intent(ACTION_AUDIO_ROUTES_CHANGED)
+                .setPackage(packageName)
+                .putExtra(EXTRA_AUDIO_ROUTES, availableRouteStrings())
+                .putExtra(EXTRA_SELECTED_ROUTE, selectedRoute)
+                .putExtra(EXTRA_AUDIO_ROUTE_ID, selectedRouteId)
+        )
+    }
+
+    private fun broadcastSelectedRoute(device: AudioDeviceInfo?) {
+        val name = when (selectedRoute) {
+            ROUTE_EARPIECE -> "Phone earpiece"
+            ROUTE_SPEAKER -> "Phone loudspeaker"
+            else -> device?.productName?.toString() ?: "Bluetooth audio"
+        }
+        sendBroadcast(
+            Intent(ACTION_AUDIO_ROUTE_CHANGED)
+                .setPackage(packageName)
+                .putExtra(EXTRA_AUDIO_ROUTE_TYPE, selectedRoute)
+                .putExtra(EXTRA_AUDIO_ROUTE_ID, selectedRouteId)
+                .putExtra(EXTRA_AUDIO_ROUTE_NAME, name)
+        )
     }
 
     private fun restoreCommunicationAudio() {
@@ -300,17 +440,12 @@ class IntercomAudioService : Service() {
                 audioManager.clearCommunicationDevice()
             } else {
                 @Suppress("DEPRECATION")
-                run {
-                    audioManager.isSpeakerphoneOn =
-                        previousSpeakerphone
-                }
+                run { audioManager.isSpeakerphoneOn = previousSpeakerphone }
             }
-
             audioManager.mode = previousAudioMode
         } catch (error: Exception) {
             Log.w(TAG, "Could not restore audio route", error)
         }
-
         routeConfigured = false
     }
 
@@ -546,6 +681,11 @@ class IntercomAudioService : Service() {
 
     override fun onDestroy() {
         running.set(false)
+        try {
+            audioManager.unregisterAudioDeviceCallback(audioDeviceCallback)
+        } catch (error: Exception) {
+            Log.w(TAG, "Could not unregister audio device callback", error)
+        }
         cleanupAudio()
         restoreCommunicationAudio()
         super.onDestroy()

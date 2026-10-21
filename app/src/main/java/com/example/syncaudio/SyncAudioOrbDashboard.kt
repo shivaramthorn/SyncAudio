@@ -21,6 +21,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -37,6 +39,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+
+data class AudioRouteOption(
+    val id: Int,
+    val type: String,
+    val name: String
+)
 
 private val SyncBg = Color(0xFF050914)
 private val SyncPanel = Color(0xFF0A1428)
@@ -62,7 +70,10 @@ fun SyncAudioOrbDashboard(
     audioStarted: Boolean,
     onStartAudio: () -> Unit,
     onStopAudio: () -> Unit,
-    onStopIntercom: () -> Unit
+    onStopIntercom: () -> Unit,
+    audioRoutes: List<AudioRouteOption> = emptyList(),
+    selectedAudioRoute: String = "speaker",
+    onSelectAudioRoute: (AudioRouteOption) -> Unit = {}
 ) {
     var selectedAction by remember { mutableStateOf("Ready") }
 
@@ -616,6 +627,15 @@ fun SyncAudioOrbDashboard(
                             fontSize = 11.sp
                         )
 
+                        if (audioStarted) {
+                            Spacer(Modifier.height(10.dp))
+                            AudioOutputSelector(
+                                routes = audioRoutes,
+                                selectedRoute = selectedAudioRoute,
+                                onSelect = onSelectAudioRoute
+                            )
+                        }
+
                         Text(
                             "Stop Intercom",
                             modifier = Modifier
@@ -639,6 +659,75 @@ fun SyncAudioOrbDashboard(
                 textAlign = TextAlign.Center
             )
         }
+    }
+}
+
+@Composable
+private fun AudioOutputSelector(
+    routes: List<AudioRouteOption>,
+    selectedRoute: String,
+    onSelect: (AudioRouteOption) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val currentName = routes.firstOrNull { it.type == selectedRoute }?.name
+        ?: when (selectedRoute) {
+            IntercomAudioService.ROUTE_EARPIECE -> "Phone earpiece"
+            IntercomAudioService.ROUTE_BLUETOOTH -> "Bluetooth audio"
+            else -> "Phone loudspeaker"
+        }
+
+    Column {
+        Text(
+            "AUDIO OUTPUT",
+            color = SyncBlue,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.sp
+        )
+        Spacer(Modifier.height(5.dp))
+        Box {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = true },
+                color = Color(0xFF10223D),
+                shape = RoundedCornerShape(13.dp),
+                border = BorderStroke(1.dp, SyncBlue.copy(alpha = 0.65f))
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 13.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("♫", color = SyncTeal, fontSize = 18.sp)
+                    Spacer(Modifier.width(10.dp))
+                    Text(currentName, color = SyncWhite, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                    Text("⌄", color = SyncBlue, fontSize = 18.sp)
+                }
+            }
+            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                routes.forEach { route ->
+                    DropdownMenuItem(
+                        text = { Text(route.name) },
+                        onClick = {
+                            expanded = false
+                            onSelect(route)
+                        }
+                    )
+                }
+                if (routes.isEmpty()) {
+                    DropdownMenuItem(
+                        text = { Text("No audio routes reported yet") },
+                        onClick = { expanded = false },
+                        enabled = false
+                    )
+                }
+            }
+        }
+        Text(
+            "Bluetooth appears when Android exposes it for communication audio.",
+            color = SyncMuted,
+            fontSize = 10.sp
+        )
     }
 }
 

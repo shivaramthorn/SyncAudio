@@ -173,6 +173,13 @@ class MainActivity : ComponentActivity() {
                     mutableStateOf(false)
                 }
 
+                val audioRoutes = remember {
+                    mutableStateListOf<AudioRouteOption>()
+                }
+                var selectedAudioRoute by remember {
+                    mutableStateOf(IntercomAudioService.ROUTE_SPEAKER)
+                }
+
                 val intercomManager = remember {
                     NearbyIntercomManager(
                         context = this@MainActivity,
@@ -225,31 +232,56 @@ class MainActivity : ComponentActivity() {
 
                 DisposableEffect(intercomManager) {
                     val audioFrameReceiver = object : BroadcastReceiver() {
-                        override fun onReceive(
-                            context: android.content.Context,
-                            intent: Intent
-                        ) {
-                            if (
-                                intent.action !=
-                                IntercomAudioService.ACTION_AUDIO_FRAME
-                            ) {
-                                return
-                            }
-
+                        override fun onReceive(context: android.content.Context, intent: Intent) {
+                            if (intent.action != IntercomAudioService.ACTION_AUDIO_FRAME) return
                             val audioBytes = intent.getByteArrayExtra(
                                 IntercomAudioService.EXTRA_AUDIO_BYTES
                             ) ?: return
-
                             intercomManager.sendAudioFrame(audioBytes)
+                        }
+                    }
+
+                    val audioRoutesReceiver = object : BroadcastReceiver() {
+                        override fun onReceive(context: android.content.Context, intent: Intent) {
+                            when (intent.action) {
+                                IntercomAudioService.ACTION_AUDIO_ROUTES_CHANGED -> {
+                                    val values = intent.getStringArrayExtra(
+                                        IntercomAudioService.EXTRA_AUDIO_ROUTES
+                                    ) ?: emptyArray()
+                                    val parsed = values.mapNotNull { value ->
+                                        val parts = value.split("|", limit = 3)
+                                        if (parts.size != 3) null else {
+                                            val id = parts[0].toIntOrNull() ?: return@mapNotNull null
+                                            AudioRouteOption(id, parts[1], parts[2])
+                                        }
+                                    }
+                                    audioRoutes.clear()
+                                    audioRoutes.addAll(parsed)
+                                    intent.getStringExtra(IntercomAudioService.EXTRA_SELECTED_ROUTE)
+                                        ?.let { selectedAudioRoute = it }
+                                }
+                                IntercomAudioService.ACTION_AUDIO_ROUTE_CHANGED -> {
+                                    intent.getStringExtra(IntercomAudioService.EXTRA_AUDIO_ROUTE_TYPE)
+                                        ?.let { selectedAudioRoute = it }
+                                }
+                            }
                         }
                     }
 
                     ContextCompat.registerReceiver(
                         this@MainActivity,
                         audioFrameReceiver,
-                        IntentFilter(
-                            IntercomAudioService.ACTION_AUDIO_FRAME
-                        ),
+                        IntentFilter(IntercomAudioService.ACTION_AUDIO_FRAME),
+                        ContextCompat.RECEIVER_NOT_EXPORTED
+                    )
+                    val routeFilter = IntentFilter().apply {
+                        addAction(IntercomAudioService.ACTION_AUDIO_ROUTES_CHANGED)
+                        addAction(IntercomAudioService.ACTION_AUDIO_ROUTE_CHANGED)
+                    }
+                    ContextCompat.registerReceiver(
+                        this@MainActivity,
+                        audioRoutesReceiver,
+                        routeFilter,
                         ContextCompat.RECEIVER_NOT_EXPORTED
                     )
 
@@ -257,17 +289,15 @@ class MainActivity : ComponentActivity() {
                         try {
                             unregisterReceiver(audioFrameReceiver)
                         } catch (_: IllegalArgumentException) {
-                            // Already unregistered.
+                            // Receiver was already unregistered.
                         }
-
+                        try {
+                            unregisterReceiver(audioRoutesReceiver)
+                        } catch (_: IllegalArgumentException) {
+                            // Receiver was already unregistered.
+                        }
                         intercomManager.stopAll()
-
-                        stopService(
-                            Intent(
-                                this@MainActivity,
-                                IntercomAudioService::class.java
-                            )
-                        )
+                        stopService(Intent(this@MainActivity, IntercomAudioService::class.java))
                     }
                 }
 
@@ -501,16 +531,28 @@ class MainActivity : ComponentActivity() {
 
                         onStopIntercom = {
                             stopService(
-                                Intent(
-                                    this@MainActivity,
-                                    IntercomAudioService::class.java
-                                )
+                                Intent(this@MainActivity, IntercomAudioService::class.java)
                             )
-
                             intercomAudioStarted = false
                             intercomManager.stopAll()
                             intercomStatus.value = "Intercom stopped"
                             addEvent("Intercom stopped")
+                        },
+                        audioRoutes = audioRoutes.toList(),
+                        selectedAudioRoute = selectedAudioRoute,
+                        onSelectAudioRoute = { route ->
+                            val routeIntent = Intent(
+                                this@MainActivity,
+                                IntercomAudioService::class.java
+                            ).apply {
+                                action = IntercomAudioService.ACTION_SET_AUDIO_ROUTE
+                                putExtra(IntercomAudioService.EXTRA_AUDIO_ROUTE_TYPE, route.type)
+                                putExtra(IntercomAudioService.EXTRA_AUDIO_ROUTE_ID, route.id)
+                                putExtra(IntercomAudioService.EXTRA_AUDIO_ROUTE_NAME, route.name)
+                            }
+                            startService(routeIntent)
+                            selectedAudioRoute = route.type
+                            addEvent("Audio output selected: ${route.name}")
                         }
                     )
                 }
